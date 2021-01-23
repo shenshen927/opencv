@@ -125,6 +125,9 @@ public:
         {
             kernel_size.assign(1, kernel_size[0]);
             strides.assign(1, strides[0]);
+            dilations.assign(1, dilations[0]);
+            pads_begin.assign(1, pads_begin[0]);
+            pads_end.assign(1, pads_end[0]);
         }
         CV_Assert(weightShape.dims() == kernel_size.size() + 2);
         for (int i = 0; i < kernel_size.size(); i++) {
@@ -311,8 +314,8 @@ public:
 #ifdef HAVE_CUDA
         if (backendId == DNN_BACKEND_CUDA)
         {
-            /* only convolution 2d and 3d supported */
-            if (ksize == 2 || ksize == 3)
+            /* only 1d, 2d and 3d convolutions supported */
+            if (ksize > 0 && ksize <= 3)
                 return true;
 
             return false;
@@ -1597,15 +1600,15 @@ public:
                                     v_float32x4 r2 = v_load_aligned(rptr + vsz_a*2);
                                     v_float32x4 r3 = v_load_aligned(rptr + vsz_a*3);
 
-                                    vs00 += w0*r0;
-                                    vs01 += w0*r1;
-                                    vs02 += w0*r2;
-                                    vs03 += w0*r3;
+                                    vs00 = v_fma(w0, r0, vs00);
+                                    vs01 = v_fma(w0, r1, vs01);
+                                    vs02 = v_fma(w0, r2, vs02);
+                                    vs03 = v_fma(w0, r3, vs03);
 
-                                    vs10 += w1*r0;
-                                    vs11 += w1*r1;
-                                    vs12 += w1*r2;
-                                    vs13 += w1*r3;
+                                    vs10 = v_fma(w1, r0, vs10);
+                                    vs11 = v_fma(w1, r1, vs11);
+                                    vs12 = v_fma(w1, r2, vs12);
+                                    vs13 = v_fma(w1, r3, vs13);
                                 }
                                 s0 += v_reduce_sum4(vs00, vs01, vs02, vs03);
                                 s1 += v_reduce_sum4(vs10, vs11, vs12, vs13);
@@ -1688,16 +1691,7 @@ public:
             umat_blobs.resize(n);
             for (size_t i = 0; i < n; i++)
             {
-                if (use_half)
-                {
-                    Mat matFP32;
-                    convertFp16(inputs[i + 1], matFP32);
-                    matFP32.copyTo(umat_blobs[i]);
-                }
-                else
-                {
-                    inputs[i + 1].copyTo(umat_blobs[i]);
-                }
+                inputs[i + 1].copyTo(umat_blobs[i]);
             }
             inputs.resize(1);
         }
@@ -1708,7 +1702,10 @@ public:
             umat_blobs.resize(n);
             for (size_t i = 0; i < n; i++)
             {
-                blobs[i].copyTo(umat_blobs[i]);
+                if (use_half)
+                    convertFp16(blobs[i], umat_blobs[i]);
+                else
+                    blobs[i].copyTo(umat_blobs[i]);
             }
         }
 
@@ -1764,14 +1761,20 @@ public:
 
         if (fusedWeights)
         {
-            weightsMat.copyTo(umat_blobs[0]);
+            if (use_half)
+                convertFp16(weightsMat, umat_blobs[0]);
+            else
+                weightsMat.copyTo(umat_blobs[0]);
             fusedWeights = false;
         }
         if (fusedBias)
         {
             if ( umat_blobs.size() < 2 )
                 umat_blobs.resize(2);
-            umat_blobs[1] = UMat(biasvec, true);
+            if (use_half)
+                convertFp16(Mat(biasvec, true), umat_blobs[1]);
+            else
+                Mat(biasvec, true).copyTo(umat_blobs[1]);
             convolutionOp->setBias(true);
             fusedBias = false;
         }
@@ -2001,6 +2004,21 @@ public:
         const auto groups = input_feature_maps / input_feature_maps_per_group;
 
         ConvolutionConfiguration config;
+
+        if (input_shape.size() == 3)
+        {
+            // Conv1D
+            // We add an extra dim for input and output tensors, because CuDNN doesn't support convolution with 3D tensors
+            input_shape.insert(std::end(input_shape) - 1, 1);
+            output_shape.insert(std::end(output_shape) - 1, 1);
+
+            // Do the similar thing for the other parameters
+            pads_begin.insert(std::begin(pads_begin), 0);
+            pads_end.insert(std::begin(pads_end), 0);
+            strides.insert(std::begin(strides), 1);
+            dilations.insert(std::begin(dilations), 1);
+            kernel_size.insert(std::begin(kernel_size), 1);
+        }
         config.kernel_size.assign(std::begin(kernel_size), std::end(kernel_size));
         config.dilations.assign(std::begin(dilations), std::end(dilations));
         config.strides.assign(std::begin(strides), std::end(strides));
@@ -2365,20 +2383,21 @@ public:
 
                     for( ; n <= nmax - 4; n += 4 )
                     {
+                        v_float32x4 d0 = v_load(dst0 + n);
+                        v_float32x4 d1 = v_load(dst1 + n);
                         v_float32x4 b0 = v_load(bptr0 + n);
                         v_float32x4 b1 = v_load(bptr1 + n);
                         v_float32x4 b2 = v_load(bptr2 + n);
                         v_float32x4 b3 = v_load(bptr3 + n);
-                        v_float32x4 d0 = v_load(dst0 + n);
-                        v_float32x4 d1 = v_load(dst1 + n);
-                        d0 += b0*a00;
-                        d1 += b0*a01;
-                        d0 += b1*a10;
-                        d1 += b1*a11;
-                        d0 += b2*a20;
-                        d1 += b2*a21;
-                        d0 += b3*a30;
-                        d1 += b3*a31;
+                        // TODO try to improve pipeline width
+                        d0 = v_fma(b0, a00, d0);
+                        d1 = v_fma(b0, a01, d1);
+                        d0 = v_fma(b1, a10, d0);
+                        d1 = v_fma(b1, a11, d1);
+                        d0 = v_fma(b2, a20, d0);
+                        d1 = v_fma(b2, a21, d1);
+                        d0 = v_fma(b3, a30, d0);
+                        d1 = v_fma(b3, a31, d1);
                         v_store(dst0 + n, d0);
                         v_store(dst1 + n, d1);
                     }
@@ -2386,8 +2405,10 @@ public:
 
                     for( ; n < nmax; n++ )
                     {
-                        float b0 = bptr0[n], b1 = bptr1[n];
-                        float b2 = bptr2[n], b3 = bptr3[n];
+                        float b0 = bptr0[n];
+                        float b1 = bptr1[n];
+                        float b2 = bptr2[n];
+                        float b3 = bptr3[n];
                         float d0 = dst0[n] + alpha00*b0 + alpha10*b1 + alpha20*b2 + alpha30*b3;
                         float d1 = dst1[n] + alpha01*b0 + alpha11*b1 + alpha21*b2 + alpha31*b3;
                         dst0[n] = d0;

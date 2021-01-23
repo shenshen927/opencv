@@ -36,6 +36,7 @@
 #include "executor/gstreamingexecutor.hpp"
 #include "backends/common/gbackend.hpp"
 #include "backends/common/gmetabackend.hpp"
+#include "backends/streaming/gstreamingbackend.hpp" // cv::gimpl::streaming::kernels()
 
 // <FIXME:>
 #if !defined(GAPI_STANDALONE)
@@ -59,8 +60,11 @@ namespace
             for (const auto &b : pkg.backends()) {
                 aux_pkg = combine(aux_pkg, b.priv().auxiliaryKernels());
             }
-            // Always include built-in meta<> implementation
-            return combine(pkg, aux_pkg, cv::gimpl::meta::kernels());
+            // Always include built-in meta<> and copy implementation
+            return combine(pkg,
+                           aux_pkg,
+                           cv::gimpl::meta::kernels(),
+                           cv::gimpl::streaming::kernels());
         };
 
         auto has_use_only = cv::gapi::getCompileArg<cv::gapi::use_only>(args);
@@ -72,7 +76,8 @@ namespace
             combine(cv::gapi::core::cpu::kernels(),
                     cv::gapi::imgproc::cpu::kernels(),
                     cv::gapi::video::cpu::kernels(),
-                    cv::gapi::render::ocv::kernels());
+                    cv::gapi::render::ocv::kernels(),
+                    cv::gapi::streaming::kernels());
 #else
             cv::gapi::GKernelPackage();
 #endif // !defined(GAPI_STANDALONE)
@@ -338,7 +343,7 @@ void cv::gimpl::GCompiler::validateInputMeta()
         return false; // should never happen
     };
 
-    for (const auto &meta_arg_idx : ade::util::indexed(ade::util::zip(m_metas, c_expr.m_ins)))
+    for (const auto meta_arg_idx : ade::util::indexed(ade::util::zip(m_metas, c_expr.m_ins)))
     {
         const auto &meta  = std::get<0>(ade::util::value(meta_arg_idx));
         const auto &proto = std::get<1>(ade::util::value(meta_arg_idx));
@@ -365,7 +370,7 @@ void cv::gimpl::GCompiler::validateOutProtoArgs()
         return;
     }
     const auto &c_expr = util::get<cv::GComputation::Priv::Expr>(m_c.priv().m_shape);
-    for (const auto &out_pos : ade::util::indexed(c_expr.m_outs))
+    for (const auto out_pos : ade::util::indexed(c_expr.m_outs))
     {
         const auto &node = proto::origin_of(ade::util::value(out_pos)).node;
         if (node.shape() != cv::GNode::NodeShape::CALL)

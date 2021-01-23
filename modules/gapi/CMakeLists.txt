@@ -38,10 +38,6 @@ if(MSVC)
   endif()
 endif()
 
-if(CMAKE_CXX_COMPILER_ID STREQUAL "AppleClang")  # don't add Clang here: issue should be investigated and fixed (workaround for Apple only)
-  ocv_warnings_disable(CMAKE_CXX_FLAGS -Wrange-loop-analysis)  # https://github.com/opencv/opencv/issues/18928
-endif()
-
 file(GLOB gapi_ext_hdrs
     "${CMAKE_CURRENT_LIST_DIR}/include/opencv2/*.hpp"
     "${CMAKE_CURRENT_LIST_DIR}/include/opencv2/${name}/*.hpp"
@@ -156,6 +152,9 @@ set(gapi_srcs
     # Serialization API and routines
     src/api/s11n.cpp
     src/backends/common/serialization.cpp
+
+    # Streaming backend
+    src/backends/streaming/gstreamingbackend.cpp
 
     # Python bridge
     src/backends/ie/bindings_ie.cpp
